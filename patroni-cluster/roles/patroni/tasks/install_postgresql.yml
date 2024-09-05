@@ -1,0 +1,23 @@
+- name: Install required packages
+  ansible.builtin.apt:
+    name: "{{ packages_to_install }}"
+    state: present
+    update_cache: true
+  become: true
+
+- name: Add PostgreSQL repository
+  shell: |
+    sudo  /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+  become: true
+
+- name: Install PostgreSQL server development packages
+  apt:
+    name: "postgresql-server-dev-{{ postgresql_version }}"
+    state: present
+  become: true
+
+- name: Stop PostgreSQL service
+  ansible.builtin.systemd:
+    name: postgresql
+    state: stopped
+  become: true

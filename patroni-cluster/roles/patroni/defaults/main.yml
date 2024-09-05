@@ -1,0 +1,7 @@
+# defaults file for patroni
+node_name: "{{ inventory_hostname }}"
+node_ip: "{{ ansible_default_ipv4.address }}"
+
+# Patroni configuration
+patroni_namespace: "percona_lab"
+patroni_scope: "cluster_1"

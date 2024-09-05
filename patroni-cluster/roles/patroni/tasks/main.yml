@@ -1,0 +1,182 @@
+- name: Install PostgreSQL and prerequisites
+  include_tasks: install_postgresql.yml
+
+- name: Install Patroni
+  apt:
+    name: "{{ patroni_package }}"
+    state: present
+  become: true
+
+- name: Stop and disable services
+  ##- name: Install pip
+  # apt:
+  #  name: python3-pip
+  # state: present
+  #become: true
+  # Install Patroni with psycopg3 and etcd3 dependencies
+  #- name: Install Patroni with psycopg3 and etcd3
+  #pip:
+  # name: patroni[psycopg3,etcd3]
+  # state: present
+  #become: true
+
+  # Install python3-psycopg2 package
+  #- name: Install python3-psycopg2 package
+  # apt:
+  #  name: python3-psycopg2
+  # state: present
+  #update_cache: yes
+  #become: true
+
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: no
+  loop:
+  - etcd
+  - patroni
+  - postgresql
+  become: true
+
+- name: Remove PostgreSQL data directory using shell command
+  ansible.builtin.shell: |
+    if [ -d /var/lib/postgresql/16/main ]; then
+      sudo rm -rf /var/lib/postgresql/16/main
+    fi
+  become: true
+
+- name: Ensure PostgreSQL service is disabled
+  ansible.builtin.systemd:
+    name: postgresql
+    enabled: no
+  become: true
+
+- name: Enable and start etcd service
+  ansible.builtin.systemd:
+    name: etcd
+    enabled: true
+    state: started
+  become: true
+
+- name: Wait for etcd to be available
+  ansible.builtin.wait_for:
+    host: "{{ ansible_fqdn }}"
+    port: 2379
+    state: started
+    delay: 5
+    timeout: 30
+  become: true
+
+- name: Ensure patroni user exists
+  ansible.builtin.user:
+    name: patroni
+    state: present
+  become: true
+
+- name: Configure Patroni
+  ansible.builtin.template:
+    src: patroni.yml.j2
+    dest: /etc/patroni/patroni.yml
+    owner: patroni
+    group: patroni
+    mode: '0644'
+  become: true
+
+- block:
+  # Task to start Patroni service on the first node (initialize the cluster)
+  - name: Start Patroni service on the first node
+    ansible.builtin.systemd:
+      name: patroni
+      state: started
+      enabled: true
+    when: inventory_hostname == groups['patroni'][0] # Run only on the first node
+    run_once: true
+
+  # Task to restart Patroni service on the other nodes
+  - name: Restart Patroni service on other nodes
+    ansible.builtin.systemd:
+      name: patroni
+      state: restarted
+      enabled: true
+    when: inventory_hostname != groups['patroni'][0] # Run on all other nodes
+  run_once: false
+- name: Initialize the cluster on one node only
+  ansible.builtin.command:
+    cmd: patronictl -c /etc/patroni/patroni.yml init
+  become: true
+  run_once: true
+  when: inventory_hostname == groups['patroni'][0] # Run on the first node in the patroni group
+  ignore_errors: true
+
+- name: Check if cluster is already initialized
+  ansible.builtin.command:
+    cmd: patronictl -c /etc/patroni/patroni.yml list
+  register: patroni_status
+  failed_when: false
+  ignore_errors: true
+- name: Initialize the cluster on one node only
+  ansible.builtin.command:
+    cmd: patronictl -c /etc/patroni/patroni.yml init
+  become: true
+  run_once: true
+  when: "'Leader' not in patroni_status.stdout" # Only initialize if no Leader is present
+  ignore_errors: true
+
+- name: Install community.postgresql Ansible collection
+  ansible.builtin.command:
+    cmd: ansible-galaxy collection install community.postgresql
+  run_once: true
+  become: true
+  delegate_to: localhost
+  tags: install_collection
+
+- name: Update PostgreSQL configuration
+  ansible.builtin.lineinfile:
+    path: /etc/postgresql/16/main/postgresql.conf
+    line: "shared_preload_libraries = 'timescaledb'"
+    create: yes
+  become: true
+
+- name: Add TimescaleDB repository for Ubuntu
+  ansible.builtin.apt_repository:
+    repo: "{{ timescaledb_repo_ubuntu }}"
+    state: present
+  when: ansible_facts['os_family'] == 'Debian' and ansible_facts['distribution'] == 'Ubuntu'
+  become: true
+
+- name: Add TimescaleDB repository for Debian
+  ansible.builtin.apt_repository:
+    repo: "{{ timescaledb_repo_debian }}"
+    state: present
+  when: ansible_facts['os_family'] == 'Debian' and ansible_facts['distribution'] == 'Debian'
+  become: true
+
+- name: Install TimescaleDB package signing key
+  ansible.builtin.apt_key:
+    url: "{{ timescaledb_key_url }}"
+    state: present
+  become: true
+
+- name: Install TimescaleDB package
+  ansible.builtin.apt:
+    name: "{{ timescaledb_version }}"
+    state: present
+    update_cache: yes
+  become: true
+
+- name: Run TimescaleDB tuning
+  ansible.builtin.command: timescaledb-tune --quiet --yes
+  become: true
+
+- name: Restart PostgreSQL service
+  ansible.builtin.systemd:
+    name: postgresql
+    state: restarted
+  become: true
+
+- name: Create TimescaleDB extension in PostgreSQL
+  community.postgresql.postgresql_query:
+    db: "{{ db_name }}"
+    query: "CREATE EXTENSION IF NOT EXISTS timescaledb;"
+  become: true
+  become_user: postgres
